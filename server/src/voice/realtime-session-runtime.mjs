@@ -28,6 +28,7 @@ import { ClientActionName, ClientActionPort } from '../client/client-action-port
 import { PresenceController } from '../client/presence-controller.mjs'
 import { ClientToolSource } from '../frontend/tools/client-tool-source.mjs'
 import { frontendToolRegistry } from '../frontend/frontend-tools.mjs'
+import { TurnMemoryHooks } from './turn-memory-hooks.mjs'
 
 const MAX_PENDING_AUDIO_CHUNKS = 30
 const RESPONSE_START_WATCHDOG_MS = 12000
@@ -70,6 +71,8 @@ export function permissionResponseGate({ isCandidate, hasPendingPermission, clai
  */
 export function createRealtimeSessionRuntime({
   ownerId, sessionId, send, logger: connectionLogger, observers,
+  memoryPresessionHandler = null, memoryAddHandler = null, memorySearchHandler = null,
+  memorySyncRecall = false, formatRecalledMemory,
   voiceAccess, actionCapabilities, initialInputSuspension = null,
   onTaskEvent, onResponseDone = () => {},
   frontendToolSourcesReady = Promise.resolve(),
@@ -149,6 +152,28 @@ export function createRealtimeSessionRuntime({
   const turnCitations = new TurnCitations()
   let realtimeSession
   let visualInput
+  const recordedAssistantResponses = new Set()
+  const pendingAddResponses = new Map()
+  const turnMemoryHooks = new TurnMemoryHooks({
+    ownerId,
+    sessionId,
+    presessionHandler: memoryPresessionHandler,
+    addHandler: memoryAddHandler,
+    searchHandler: memorySearchHandler,
+    syncRecall: memorySyncRecall,
+    ...(formatRecalledMemory ? { formatRecalledMemory } : {}),
+    onInterruptForRecall: ({ frontend }) => {
+      if (!frontend?.capabilities?.interruptionPlaysOut) {
+        emit({ type: GatewayServerEvent.PLAYBACK_CLEAR, reason: 'memory_recall_interrupt' })
+      }
+    },
+    conversationSync,
+    turns,
+    getFrontend: () => realtimeSession?.frontend,
+    isInjectionBlocked: () => inputCollecting,
+    trackPending: promise => observers?.track?.(promise),
+    logger: connectionLogger,
+  })
   const clearVisualInput = () => {
     realtimeSession?.clearPendingImage?.()
     visualInput?.reset?.()
@@ -189,6 +214,9 @@ export function createRealtimeSessionRuntime({
       tools: frontendSourceToolDefinitions(sessionToolSources),
     },
     memories: memoryService?.list(ownerId, { limit: 64 }) || [],
+    ...(turnMemoryHooks.presessionContext
+      ? { presessionMemoryContext: turnMemoryHooks.presessionContext }
+      : {}),
     recentMessages: frontendRecentMessages(),
     ...(sessionAssistantProfile
       ? { assistantProfile: sessionAssistantProfile }
@@ -237,6 +265,7 @@ export function createRealtimeSessionRuntime({
     getAgentContext,
     getSessionOptions: () => ({
       ...(sessionOutputVoice ? { voice: sessionOutputVoice } : {}),
+      ...(turnMemoryHooks.syncRecallActive ? { deferAutomaticResponse: true } : {}),
     }),
     shouldReconnect: () => inputEnabled || outputEnabled,
     onEvent: event => handleEvent(event),
@@ -263,6 +292,16 @@ export function createRealtimeSessionRuntime({
     onReady: createdFrontend => {
       const resumedFromSleep = waking
       waking = false
+      if (turnMemoryHooks.syncRecallActive && !createdFrontend.capabilities?.deferAutomaticResponse) {
+        connectionLogger.warn(
+          'memory_hooks.sync_recall_unsupported_defer',
+          {
+            provider: createdFrontend.provider.key,
+            model: createdFrontend.provider.model?.() || '',
+          },
+          `同步召回记忆已开启，但当前 Provider（${createdFrontend.provider.label}）不支持阻止云端自动回复；语音轮次将在记忆返回后打断当前回复并重新生成`,
+        )
+      }
       if (outputEnabled) taskCoordinator.claimPendingNotifications()
       emit({
         type: GatewayServerEvent.VOICE_READY,
@@ -287,6 +326,8 @@ export function createRealtimeSessionRuntime({
     },
     onDisconnected: () => {
       pendingProviderInputs.clear()
+      pendingAddResponses.clear()
+      turnMemoryHooks.cancelPendingSearch('disconnected')
       for (const listener of realtimeEventListeners) listener({ type: 'session.disconnected' })
       taskCoordinator.resetPresentation()
       clearVisualInput()
@@ -566,6 +607,29 @@ export function createRealtimeSessionRuntime({
     responseStartWatchdog.unref?.()
   }
 
+  const buildPresessionMetadata = () => ({
+    ownerId,
+    sessionId,
+    provider: realtimeSession.providerKey,
+    descriptor: { ...descriptor },
+    client: { ...clientContext },
+    inputEnabled,
+    outputEnabled,
+    textOnly: nonVoiceClient,
+    recentMessages: frontendRecentMessages(),
+    signal: toolScope.signal,
+  })
+  const ensurePresessionReady = () => (
+    turnMemoryHooks.hasPresession
+      ? turnMemoryHooks.loadPresessionContext(buildPresessionMetadata())
+      : Promise.resolve('')
+  )
+  const ensureRealtimeSession = async () => {
+    await ensurePresessionReady()
+    if (closed) return
+    return realtimeSession.ensure()
+  }
+
   const inputs = new RealtimeInputRuntime({
     ownerId,
     sessionId,
@@ -577,7 +641,7 @@ export function createRealtimeSessionRuntime({
     announcements,
     send: event => emit(event),
     getFrontend: () => realtimeSession.frontend,
-    ensureFrontend: () => realtimeSession.ensure(),
+    ensureFrontend: ensureRealtimeSession,
     clearResponseCandidate,
     expectResponseFor,
     shouldEnsurePermissionResponse: context => responseTurnCandidate === context,
@@ -586,11 +650,29 @@ export function createRealtimeSessionRuntime({
     onSpeechStarted: fields => {
       connectionLogger.info('realtime.provider.speech_started', fields)
       observeSessionAudio({ type: 'speech_started', ...fields })
+      turnMemoryHooks.cancelPendingSearch('user_interruption')
     },
     onSpeechStopped: fields => {
       connectionLogger.info('realtime.provider.speech_stopped', fields)
       observeSessionAudio({ type: 'speech_stopped', ...fields })
     },
+    onUserTranscriptCommitted: fields => {
+      const { skipSearch = false, ...publicFields } = fields || {}
+      observers.emit('onUserTranscript', {
+        ownerId,
+        sessionId,
+        ...publicFields,
+        logger: connectionLogger,
+      })
+      if (!skipSearch) turnMemoryHooks.onUserTranscript(publicFields)
+    },
+    shouldDeferAutomaticResponse: () => (
+      turnMemoryHooks.syncRecallActive
+      && realtimeSession.frontend?.capabilities?.deferAutomaticResponse === true
+    ),
+    prepareManualTurnMemory: turnMemoryHooks.syncRecallActive
+      ? fields => turnMemoryHooks.recallForManualTurn(fields)
+      : null,
   })
 
   presentationRuntime = new RealtimePresentationRuntime({
@@ -612,6 +694,20 @@ export function createRealtimeSessionRuntime({
     announcementQuietMs: config.announcementQuietMs,
     responseContextCleanupMs: RESPONSE_CONTEXT_CLEANUP_MS,
     turnCitations,
+    onAssistantTranscriptRecorded: ({ responseId }) => {
+      if (!responseId) return
+      recordedAssistantResponses.add(responseId)
+      if (recordedAssistantResponses.size > 128) {
+        recordedAssistantResponses.delete(recordedAssistantResponses.values().next().value)
+      }
+      const pendingAdd = pendingAddResponses.get(responseId)
+      if (!pendingAdd) return
+      pendingAddResponses.delete(responseId)
+      turnMemoryHooks.onResponseDone(pendingAdd)
+    },
+    onPlaybackCancelled: ({ responseId }) => {
+      if (responseId) pendingAddResponses.delete(responseId)
+    },
   })
 
   taskCoordinator.start()
@@ -656,9 +752,13 @@ export function createRealtimeSessionRuntime({
     if (inputs.handleProviderEvent(event)) return
     const responseFailed = event.type === 'response.done' && event.response?.status === 'failed'
     // Terminal handling may remove or suppress the context; retain its original
-    // identity for error reporting and content-safety recovery afterwards.
-    const responseContext = responseFailed ? presentationRuntime.get(realtimeResponseId(event)) : null
-    const failedContext = responseContext ? { ...responseContext } : null
+    // identity for error reporting, hooks and content-safety recovery afterwards.
+    const responseContextBeforeDone = event.type === 'response.done'
+      ? presentationRuntime.get(realtimeResponseId(event))
+      : null
+    const failedContext = responseFailed && responseContextBeforeDone
+      ? { ...responseContextBeforeDone }
+      : null
     if (event.type === 'response.done') {
       const responseId = realtimeResponseId(event)
       const context = presentationRuntime.get(responseId)
@@ -717,10 +817,52 @@ export function createRealtimeSessionRuntime({
       // Alternative transports distinguish generation from audio delivery.
       // Existing client events stay unchanged.
       if (event.type === 'response.done') {
+        const responseId = realtimeResponseId(event)
+        const status = event.response?.status || 'unknown'
+        const postContext = presentationRuntime.get(responseId)
+        const responseMeta = postContext || responseContextBeforeDone
+        const suppressed = Boolean(responseMeta?.suppressed)
+        const awaitsToolFollowUp = Boolean(responseMeta?.awaitsToolFollowUp)
+        const turnId = responseMeta?.turnId || ''
+        const origin = responseMeta?.origin || 'model'
         onResponseDone({
-          id: realtimeResponseId(event),
-          status: event.response?.status || 'unknown',
+          id: responseId,
+          status,
         })
+        observers.emit('onResponseDone', {
+          ownerId,
+          sessionId,
+          responseId,
+          turnId,
+          origin,
+          status,
+          suppressed,
+          awaitsToolFollowUp,
+          logger: connectionLogger,
+        })
+        if (status === 'completed' && !suppressed && !awaitsToolFollowUp) {
+          const doneMeta = { responseId, turnId, origin, status }
+          const hasPendingAssistantTranscript = Boolean(
+            postContext
+            && !recordedAssistantResponses.has(responseId)
+            && (
+              postContext.pendingTranscripts?.some(item => item.final)
+              || (
+                realtimeSession.frontend?.capabilities?.requiresResponseCreated
+                && postContext.hasAudio
+                && !postContext.transcriptDone
+              )
+            ),
+          )
+          if (hasPendingAssistantTranscript) {
+            pendingAddResponses.set(responseId, doneMeta)
+            if (pendingAddResponses.size > 64) {
+              pendingAddResponses.delete(pendingAddResponses.keys().next().value)
+            }
+          } else {
+            turnMemoryHooks.onResponseDone(doneMeta)
+          }
+        }
       }
       // A failed response is also an error, not only a playback terminal.
       // Cancelled/incomplete and superseded responses remain silent.
@@ -1075,7 +1217,10 @@ export function createRealtimeSessionRuntime({
           ? 0
           : config.sleepTimeoutMs,
       )
-      frontendToolSourcesReady.then(() => {
+      Promise.all([
+        frontendToolSourcesReady,
+        ensurePresessionReady(),
+      ]).then(() => {
         if (closed) return
         realtimeSession.updateAgentContext(getAgentContext())
         if (sleeping) {
@@ -1186,6 +1331,7 @@ export function createRealtimeSessionRuntime({
     } else if (event.type === GatewayClientEvent.INTERRUPT) {
       sleepController.recordActivity()
       turns.advanceBoundary()
+      turnMemoryHooks.cancelPendingSearch('user_interruption')
       announcementWindow.interrupt()
       announcements.dismissActive()
       realtimeSession.cancelResponse()
@@ -1240,6 +1386,7 @@ export function createRealtimeSessionRuntime({
       presenceController.wake()
       sleepController?.disable()
       turns.advanceBoundary()
+      turnMemoryHooks.cancelPendingSearch('muted')
       announcementWindow.reset()
       progressAnnouncements.clear()
       realtimeSession.close({ notifyDisconnected: true })
@@ -1345,6 +1492,9 @@ export function createRealtimeSessionRuntime({
     close() {
       if (closed) return
       closed = true
+      turnMemoryHooks.close()
+      pendingAddResponses.clear()
+      recordedAssistantResponses.clear()
       realtimeEventListeners.clear()
       pendingProviderInputs.clear()
       toolScope.abort(new Error('Client disconnected'))

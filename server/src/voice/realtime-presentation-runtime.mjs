@@ -88,6 +88,8 @@ export class RealtimePresentationRuntime {
     announcementQuietMs,
     responseContextCleanupMs,
     turnCitations = null,
+    onAssistantTranscriptRecorded = () => {},
+    onPlaybackCancelled = () => {},
   }) {
     this.ownerId = ownerId
     this.sessionId = sessionId
@@ -107,6 +109,8 @@ export class RealtimePresentationRuntime {
     this.announcementQuietMs = announcementQuietMs
     this.responseContextCleanupMs = responseContextCleanupMs
     this.turnCitations = turnCitations
+    this.onAssistantTranscriptRecorded = onAssistantTranscriptRecorded
+    this.onPlaybackCancelled = onPlaybackCancelled
     this.contexts = new Map()
     this.playbackTurns = new Map()
     this.lastCorrectionTurn = null
@@ -539,6 +543,12 @@ export class RealtimePresentationRuntime {
         ...(citations.length ? { citations } : {}),
         ...context,
       })
+      this.onAssistantTranscriptRecorded({
+        responseId: id,
+        turnId: context.turnId || '',
+        origin: context.origin || 'model',
+        content,
+      })
     }
     this.send({
       type: final
@@ -711,6 +721,7 @@ export class RealtimePresentationRuntime {
       context.pendingTranscripts = []
       this.#scheduleContextCleanup(id, context)
     }
+    this.onPlaybackCancelled({ responseId: id, reason })
     this.send({
       type: GatewayServerEvent.VOICE_STATE,
       state: this.turns.userSpeaking ? 'listening' : 'idle',

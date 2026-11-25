@@ -6,6 +6,7 @@ export const GATEWAY_RESERVED_ENVELOPES = Object.freeze([
   'permission_request',
   'background_work_progress',
   'restored_context',
+  'recalled_memory',
 ])
 
 const RESERVED_ENVELOPE_PATTERN = new RegExp(

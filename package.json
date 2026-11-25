@@ -62,6 +62,7 @@
     "./web-retrieval": "./server/src/frontend/retrieval/providers/web-retrieval.mjs",
     "./knowledge-provider": "./server/src/knowledge/provider.mjs",
     "./memory-provider": "./server/src/memory/provider.mjs",
+    "./turn-memory-hooks": "./server/src/voice/turn-memory-hooks.mjs",
     "./voicemem-provider": "./server/src/memory/providers/voicemem/provider.mjs",
     "./settings": "./desktop/src/settings-store.mjs",
     "./skin-store": "./desktop/src/skin-store.mjs",

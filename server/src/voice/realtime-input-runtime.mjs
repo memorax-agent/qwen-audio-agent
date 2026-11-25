@@ -48,6 +48,9 @@ export class RealtimeInputRuntime {
     reportFrontendError,
     onSpeechStarted = () => {},
     onSpeechStopped = () => {},
+    onUserTranscriptCommitted = () => {},
+    shouldDeferAutomaticResponse = () => false,
+    prepareManualTurnMemory = null,
     createInputTurnId = () => `text_${randomUUID().replaceAll('-', '')}`,
   }) {
     this.ownerId = ownerId
@@ -68,6 +71,9 @@ export class RealtimeInputRuntime {
     this.reportFrontendError = reportFrontendError
     this.onSpeechStarted = onSpeechStarted
     this.onSpeechStopped = onSpeechStopped
+    this.onUserTranscriptCommitted = onUserTranscriptCommitted
+    this.shouldDeferAutomaticResponse = shouldDeferAutomaticResponse
+    this.prepareManualTurnMemory = prepareManualTurnMemory
     this.createInputTurnId = createInputTurnId
   }
 
@@ -103,6 +109,16 @@ export class RealtimeInputRuntime {
         role: 'user',
         turnId: failedInput.context?.turnId,
       })
+      if (this.shouldDeferAutomaticResponse() && failedInput.context?.turnId) {
+        this.announcementWindow.responseDone({ turnId: failedInput.context.turnId, failed: true })
+        this.announcements.flush()
+        this.send({
+          type: GatewayServerEvent.VOICE_STATE,
+          state: 'idle',
+          turnId: failedInput.context.turnId,
+          origin: 'model',
+        })
+      }
     }
     return true
   }
@@ -186,7 +202,9 @@ export class RealtimeInputRuntime {
       })
       return
     }
-    this.expectResponseFor(stoppedTurn)
+    if (!this.shouldDeferAutomaticResponse()) {
+      this.expectResponseFor(stoppedTurn)
+    }
     this.send({
       type: GatewayServerEvent.VOICE_STATE,
       state: 'processing',
@@ -244,6 +262,16 @@ export class RealtimeInputRuntime {
         role: 'user',
         turnId: transcriptTurn.turnId,
       })
+      if (this.shouldDeferAutomaticResponse()) {
+        this.announcementWindow.responseDone({ turnId: transcriptTurn.turnId, failed: true })
+        this.announcements.flush()
+        this.send({
+          type: GatewayServerEvent.VOICE_STATE,
+          state: 'idle',
+          turnId: transcriptTurn.turnId,
+          origin: 'model',
+        })
+      }
       return
     }
     this.turns.commit(transcriptTurn)
@@ -268,6 +296,12 @@ export class RealtimeInputRuntime {
       role: 'user',
       content: transcript,
       turnId: transcriptTurn.turnId,
+    })
+    this.onUserTranscriptCommitted({
+      transcript,
+      turnId: transcriptTurn.turnId,
+      turnGeneration: transcriptTurn.turnGeneration,
+      source: 'voice-user',
     })
   }
 
@@ -334,8 +368,51 @@ export class RealtimeInputRuntime {
       content: display,
       turnId: inputTurnId,
     })
-    this.ensureFrontend()
-      .then(() => this.getFrontend().sendUserInput(parts, inputContext))
+    const committedText = String(text || display || '').trim()
+    const syncManualMemory = Boolean(committedText && this.prepareManualTurnMemory)
+    if (committedText) {
+      this.onUserTranscriptCommitted({
+        transcript: committedText,
+        turnId: inputContext.turnId,
+        turnGeneration: inputContext.turnGeneration,
+        source: 'text-user',
+        skipSearch: syncManualMemory,
+      })
+    }
+    const deliverManualInput = async () => {
+      let recalledText = ''
+      if (syncManualMemory) {
+        const recall = await this.prepareManualTurnMemory({
+          transcript: committedText,
+          turnId: inputContext.turnId,
+          turnGeneration: inputContext.turnGeneration,
+          source: 'text-user',
+        })
+        if (!recall?.current) return null
+        recalledText = String(recall.formatted || '').trim()
+      }
+      await this.ensureFrontend()
+      if (
+        this.turns.committedTurnGeneration !== inputContext.turnGeneration
+        || this.turns.turnGeneration !== inputContext.turnGeneration
+      ) {
+        return null
+      }
+      const frontend = this.getFrontend()
+      if (recalledText && typeof frontend?.appendUserContext === 'function') {
+        const injected = await frontend.appendUserContext(recalledText, {
+          shouldInject: () => (
+            this.turns.committedTurnGeneration === inputContext.turnGeneration
+            && this.turns.turnGeneration === inputContext.turnGeneration
+            && this.getFrontend() === frontend
+            && frontend.ready !== false
+          ),
+        })
+        if (injected === false) return null
+      }
+      return frontend.sendUserInput(parts, inputContext)
+    }
+    deliverManualInput()
       .then(outcome => {
         if (!outcome?.timedOut) return
         this.turns.failManualInput(inputContext)

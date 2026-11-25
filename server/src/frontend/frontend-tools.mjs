@@ -163,6 +163,7 @@ export const inputRequestResponseInstructions = [
 ].join(' ')
 
 export function buildFrontendInstructions(agentContext = {}) {
+  const presessionMemory = String(agentContext.presessionMemoryContext || '').trim()
   return [
     loadFrontendPrompt(),
     ...optionalFrontendFeatures.filter(feature => feature.entries.some(entry => (
@@ -173,6 +174,7 @@ export function buildFrontendInstructions(agentContext = {}) {
     resolveAssistantProfile(agentContext),
     '</assistant_profile>',
     ...optionalFrontendFeatures.map(feature => feature.context?.(agentContext)).filter(Boolean),
+    ...(presessionMemory ? [presessionMemory] : []),
     buildFrontendContext(agentContext),
   ].join('\n\n')
 }

@@ -572,6 +572,18 @@ export const config = {
     1000,
     { min: 10 },
   ),
+  // 先进记忆系统开关：开启后关闭原有内置记忆逻辑（Markdown/VoiceMem、memory 工具、
+  // 会话结束抽取/偏好学习与会话摘要），转而启用 server/src/memory/advanced-memory.mjs
+  // 的轮次记忆 presessionHandler / addHandler / searchHandler。默认关闭。
+  advancedMemoryEnabled: ['on', 'true', '1'].includes(
+    String(process.env.QWEN_AUDIO_ADVANCED_MEMORY || 'off').trim().toLowerCase(),
+  ),
+  // 先进记忆同步召回开关：开启后尽量阻止云端在用户说完后自动回复，等 searchHandler
+  // 返回记忆后再由 Gateway 触发回复；若当前 Provider 不支持延迟自动回复，则在记忆
+  // 返回后打断当前回复并注入记忆重新回复，同时输出 warning。默认关闭（异步空闲注入）。
+  advancedMemorySyncRecall: ['on', 'true', '1'].includes(
+    String(process.env.QWEN_AUDIO_ADVANCED_MEMORY_SYNC_RECALL || 'off').trim().toLowerCase(),
+  ),
   // Session-end automatic memory extraction (invisible memory, issue #92).
   // Runs one stateless request against a lightweight OpenAI-compatible text
   // model after a voice session closes; silently disabled without an API key

@@ -126,6 +126,9 @@ const DEFAULT_CAPABILITIES = Object.freeze({
   interruptionPlaysOut: false,
   // Output audio arrives at playback speed, with no lead: clients buffer it even from a local Gateway.
   pacedOutputAudio: false,
+  // Supports disabling automatic cloud responses on VAD turn end (e.g. turn_detection.create_response = false)
+  // so Gateway can inject synchronous context before triggering response.create.
+  deferAutomaticResponse: false,
 })
 const DEFAULT_RESPONSE_CANCEL_GRACE_MS = 1_000
 const MAX_PENDING_FINAL_RESPONSES = 100
@@ -541,13 +544,46 @@ export class RealtimeFrontend {
     return this.enqueueAction(() => this.applyUserInput(parts, options))
   }
 
-  appendUserContext(text) {
+  appendUserContext(text, { shouldInject } = {}) {
     const content = String(text || '').trim()
-    if (!content) return Promise.resolve()
+    if (!content) return Promise.resolve(false)
     if (!this.capabilities.conversationItems) return Promise.resolve(false)
-    return this.enqueueAction(() => this.createConversationItem(
-      this.protocol.userTextItem(content),
-    ))
+    return this.enqueueAction(async () => {
+      if (shouldInject && !shouldInject()) return false
+      return this.createConversationItem(
+        this.protocol.userTextItem(content),
+      )
+    })
+  }
+
+  appendUserContextAndRespond(
+    text,
+    context = {},
+    {
+      origin = 'model',
+      shouldRespond,
+      interrupt = false,
+      response,
+    } = {},
+  ) {
+    const content = String(text || '').trim()
+    if (content && !this.capabilities.conversationItems) {
+      return Promise.resolve({ completed: false, skipped: true, unsupported: true })
+    }
+    if (!this.capabilities.clientResponses) {
+      return Promise.resolve({ completed: false, skipped: true, unsupported: true })
+    }
+    if (interrupt) {
+      this.cancel({ reason: 'memory_recall_interrupt' })
+    }
+    return this.enqueueResponse(origin, context, async pending => {
+      pending.isCurrent = shouldRespond
+      if (shouldRespond && !shouldRespond()) return false
+      if (content) {
+        await this.createConversationItem(this.protocol.userTextItem(content))
+      }
+      return this.sendResponse(response)
+    })
   }
 
   ensureResponse(context = {}, { shouldCreate, response, afterToolResults = false } = {}) {
@@ -940,8 +976,8 @@ export class RealtimeFrontend {
     const generation = this.responseQueueGeneration
     const run = async () => {
       await this.whenIdle()
-      if (!this.ready || generation !== this.responseQueueGeneration) return
-      await action()
+      if (!this.ready || generation !== this.responseQueueGeneration) return false
+      return action()
     }
     this.outputQueue = this.outputQueue.then(run, run)
     return this.outputQueue

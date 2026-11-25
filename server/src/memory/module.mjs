@@ -9,6 +9,28 @@ import { MemorySessionObserver } from './session-observer.mjs'
 
 export function createMemoryModule({ config, logger, conversationSync, textModelCall,
   audit, memoryProvider, frontendMemory } = {}) {
+  if (config?.advancedMemoryEnabled === true) {
+    return {
+      services: {
+        frontendMemory: null,
+        frontendMemoryService: null,
+        memoryProvider: null,
+        preferenceCandidates: null,
+        preferencePromoter: null,
+        profileObserver: null,
+      },
+      sessionObservers: [],
+      close: () => {},
+      mountRoutes(app) {
+        app.get('/api/memory', (_req, res) => (
+          res.status(404).json({ error: 'frontend memory is not configured' })
+        ))
+        app.patch('/api/memory', (_req, res) => (
+          res.status(404).json({ error: 'frontend memory is not configured' })
+        ))
+      },
+    }
+  }
   let defaultMemoryProvider = null
   if (memoryProvider === undefined && !frontendMemory) {
     defaultMemoryProvider = createConfiguredMemoryProvider({

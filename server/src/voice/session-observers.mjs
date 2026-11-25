@@ -24,6 +24,13 @@ export class SessionObservers {
     }
   }
 
+  track(promise) {
+    if (!promise?.then) return
+    const pending = Promise.resolve(promise).catch(() => {})
+    this.pending.add(pending)
+    void pending.finally(() => this.pending.delete(pending))
+  }
+
   async drain() {
     while (this.pending.size) await Promise.allSettled([...this.pending])
   }

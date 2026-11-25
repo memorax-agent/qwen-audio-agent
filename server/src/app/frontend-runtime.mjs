@@ -13,6 +13,11 @@ export function createFrontendRuntime({
   config = defaultConfig,
   logger = defaultLogger,
   sessionObservers = [],
+  memoryPresessionHandler = null,
+  memoryAddHandler = null,
+  memorySearchHandler = null,
+  memorySyncRecall = false,
+  formatRecalledMemory,
   taskManager = new TaskManager(),
   inputAssets = new InputAssetRegistry(),
   conversationSync = defaultConversationSync,
@@ -27,6 +32,18 @@ export function createFrontendRuntime({
   frontendRetrieval = null, frontendKnowledge = null,
   spawnThinkingDescription = '',
 } = {}) {
+  if (memoryPresessionHandler != null && typeof memoryPresessionHandler !== 'function') {
+    throw new TypeError('memoryPresessionHandler must be a function')
+  }
+  if (memoryAddHandler != null && typeof memoryAddHandler !== 'function') {
+    throw new TypeError('memoryAddHandler must be a function')
+  }
+  if (memorySearchHandler != null && typeof memorySearchHandler !== 'function') {
+    throw new TypeError('memorySearchHandler must be a function')
+  }
+  if (formatRecalledMemory != null && typeof formatRecalledMemory !== 'function') {
+    throw new TypeError('formatRecalledMemory must be a function')
+  }
   const observers = new SessionObservers(sessionObservers)
   const sessions = new Set()
   let closed = false
@@ -40,7 +57,9 @@ export function createFrontendRuntime({
   const dependencies = {
     config, taskManager, inputAssets, conversationSync, realtimeProviderRegistry,
     defaultRealtimeProvider, taskAnnouncementFactory, frontendToolSources,
-    frontendToolSourcesReady, observers, memoryService, sessionDigests, notesStore,
+    frontendToolSourcesReady, observers,
+    memoryPresessionHandler, memoryAddHandler, memorySearchHandler, memorySyncRecall, formatRecalledMemory,
+    memoryService, sessionDigests, notesStore,
     taskOperations, backendRuntime, backendAvailability,
     respondAuthorization, respondInput, permissionPolicy, realtimeFrontendFactory,
     frontendRetrieval, frontendKnowledge, spawnThinkingDescription,

@@ -47,6 +47,7 @@ export const gptLiveProvider = {
     responseMetadataCorrelation: true,
     perResponseInstructions: true,
     sessionOutputVoice: true,
+    deferAutomaticResponse: true,
   },
 
   model: () => connection.model,
@@ -69,6 +70,14 @@ export const gptLiveProvider = {
 
   buildSession: ({ agentContext, sessionOptions }) => {
     const voice = String(sessionOptions?.voice || '').trim() || gptLiveProvider.voice()
+    const baseTurnDetection = modelProfile().sessionDefaults.turnDetection
+    const turnDetection = (
+      sessionOptions?.deferAutomaticResponse === true
+      && baseTurnDetection
+      && typeof baseTurnDetection === 'object'
+    )
+      ? { ...baseTurnDetection, create_response: false }
+      : baseTurnDetection
     return {
       type: 'realtime',
       instructions: buildFrontendInstructions(agentContext),
@@ -77,7 +86,7 @@ export const gptLiveProvider = {
       audio: {
         input: {
           format: { type: 'audio/pcm', rate: 24000 },
-          turn_detection: modelProfile().sessionDefaults.turnDetection,
+          turn_detection: turnDetection,
         },
         output: {
           format: { type: 'audio/pcm', rate: 24000 },

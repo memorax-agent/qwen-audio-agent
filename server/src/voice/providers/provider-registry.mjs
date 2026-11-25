@@ -46,6 +46,7 @@ const CAPABILITY_FLAGS = [
   'toolOutputsBeforeResponse',
   'interruptionPlaysOut',
   'pacedOutputAudio',
+  'deferAutomaticResponse',
 ]
 
 const MODEL_CAPABILITY_FLAGS = [

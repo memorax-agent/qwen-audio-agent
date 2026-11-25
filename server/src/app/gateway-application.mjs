@@ -1,5 +1,6 @@
 import { registerGatewayHttpRoutes } from './gateway-http-routes.mjs'
 import { optionalModuleFactories } from './optional-modules.mjs'
+import { createAdvancedMemoryHandlers } from '../memory/advanced-memory.mjs'
 import { OperationAudit } from '../core/operation-audit.mjs'
 import express from 'express'
 import { createServer } from 'http'
@@ -78,6 +79,11 @@ export function createGatewayApplication({
   frontendRetrieval = null,
   memoryProvider = undefined,
   frontendMemory = null,
+  memoryPresessionHandler = null,
+  memoryAddHandler = null,
+  memorySearchHandler = null,
+  memorySyncRecall = undefined,
+  formatRecalledMemory,
   knowledgeProvider = null,
   // Compatibility alias for embedders that adopted the original injection name.
   knowledgeRetrievalProvider = null,
@@ -312,7 +318,7 @@ const {
 // 工具也不会暴露给模型。
 let sessionDigests = null
 let sessionSummariser = null
-if (config.sessionDigestEnabled) {
+if (config.sessionDigestEnabled && !config.advancedMemoryEnabled) {
   sessionDigests = new SessionDigestPool({
     filePath: config.sessionDigestPath,
     onWarning: warning => logger.warn('session_digest.persistence_warning', { warning }),
@@ -408,8 +414,62 @@ const backendAvailability = new BackendAvailability({
   },
 })
 backendAvailability.refresh()
+const advancedMemoryEnabled = config.advancedMemoryEnabled === true
+if (advancedMemoryEnabled) {
+  const overridden = []
+  if (memoryProvider != null) overridden.push('memoryProvider(injected)')
+  else if (config.memoryProvider) overridden.push(`memoryProvider=${config.memoryProvider}`)
+  if (frontendMemory != null) overridden.push('frontendMemory(injected)')
+  if (config.memoryAutoEnabled === true) overridden.push('memoryAutoEnabled')
+  if (config.preferenceLearningEnabled === true) overridden.push('preferenceLearningEnabled')
+  if (config.sessionDigestEnabled === true) overridden.push('sessionDigestEnabled')
+  if (overridden.length) {
+    logger.warn(
+      'memory.legacy_overridden',
+      {
+        overridden,
+        memoryProvider: config.memoryProvider || null,
+        memoryAutoEnabled: config.memoryAutoEnabled === true,
+        preferenceLearningEnabled: config.preferenceLearningEnabled === true,
+        sessionDigestEnabled: config.sessionDigestEnabled === true,
+      },
+      `先进记忆系统已开启，原有记忆配置已被覆写并关闭：${overridden.join(', ')}`,
+    )
+  }
+}
+const advancedMemoryHandlers = advancedMemoryEnabled
+  ? createAdvancedMemoryHandlers({ config, logger })
+  : null
+const effectiveMemoryPresessionHandler = advancedMemoryEnabled
+  ? (memoryPresessionHandler ?? advancedMemoryHandlers?.presessionHandler ?? null)
+  : null
+const effectiveMemoryAddHandler = advancedMemoryEnabled
+  ? (memoryAddHandler ?? advancedMemoryHandlers?.addHandler ?? null)
+  : null
+const effectiveMemorySearchHandler = advancedMemoryEnabled
+  ? (memorySearchHandler ?? advancedMemoryHandlers?.searchHandler ?? null)
+  : null
+const effectiveMemorySyncRecall = advancedMemoryEnabled
+  ? (memorySyncRecall ?? (config.advancedMemorySyncRecall === true))
+  : false
+const effectiveFormatRecalledMemory = advancedMemoryEnabled
+  ? (formatRecalledMemory ?? advancedMemoryHandlers?.formatRecalledMemory)
+  : undefined
+if (advancedMemoryEnabled) {
+  logger.info('memory.advanced_enabled', {
+    hasPresessionHandler: typeof effectiveMemoryPresessionHandler === 'function',
+    hasAddHandler: typeof effectiveMemoryAddHandler === 'function',
+    hasSearchHandler: typeof effectiveMemorySearchHandler === 'function',
+    syncRecall: effectiveMemorySyncRecall,
+  })
+}
 const frontendRuntime = createFrontendRuntime({
   memoryService: frontendMemoryRuntime,
+  memoryPresessionHandler: effectiveMemoryPresessionHandler,
+  memoryAddHandler: effectiveMemoryAddHandler,
+  memorySearchHandler: effectiveMemorySearchHandler,
+  memorySyncRecall: effectiveMemorySyncRecall,
+  formatRecalledMemory: effectiveFormatRecalledMemory,
   sessionDigests,
   sessionObservers: [
     ...optionalModules.flatMap(module => module.sessionObservers || []),
@@ -490,6 +550,7 @@ const close = () => {
     await webRtcIngress?.close()
     await realtimeGateway?.close?.()
     await frontendRuntime.close()
+    await advancedMemoryHandlers?.close?.()
     await frontendMcpRuntime?.close?.()
     await frontendOpenApiRuntime?.close?.()
     for (const source of additionalToolSources) await source.close()
@@ -537,6 +598,21 @@ return {
     permissionPolicy,
     realtimeGateway,
     frontendRuntime,
+    advancedMemory: advancedMemoryEnabled
+      ? {
+          enabled: true,
+          syncRecall: effectiveMemorySyncRecall,
+          presessionHandler: effectiveMemoryPresessionHandler,
+          addHandler: effectiveMemoryAddHandler,
+          searchHandler: effectiveMemorySearchHandler,
+        }
+      : {
+          enabled: false,
+          syncRecall: false,
+          presessionHandler: null,
+          addHandler: null,
+          searchHandler: null,
+        },
     webRtcIngress,
     sessionDigests,
     sessionSummariser,
